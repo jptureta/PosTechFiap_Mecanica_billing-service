@@ -36,6 +36,26 @@ spec:
                 secretKeyRef:
                   name: billing-service-secrets
                   key: payment-provider-token
+            - name: MERCADO_PAGO_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: billing-service-secrets
+                  key: mercado-pago-access-token
+            - name: MERCADO_PAGO_USER_ID
+              valueFrom:
+                secretKeyRef:
+                  name: billing-service-secrets
+                  key: mercado-pago-user-id
+            - name: MERCADO_PAGO_POS_ID
+              valueFrom:
+                secretKeyRef:
+                  name: billing-service-secrets
+                  key: mercado-pago-pos-id
+            - name: MERCADO_PAGO_NOTIFICATION_URL
+              valueFrom:
+                secretKeyRef:
+                  name: billing-service-secrets
+                  key: mercado-pago-notification-url
             - name: JWT_SECRET_KEY
               valueFrom:
                 secretKeyRef:
@@ -45,6 +65,22 @@ spec:
               value: HS256
             - name: OS_SERVICE_URL
               value: http://os-service:8000
+            - name: MESSAGING_ENABLED
+              value: "true"
+            - name: AWS_REGION
+              value: us-east-1
+            - name: OS_EVENTS_QUEUE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: microservices-secrets
+                  key: os-events-queue-url
+                  optional: true
+            - name: BILLING_COMMANDS_QUEUE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: microservices-secrets
+                  key: billing-commands-queue-url
+                  optional: true
           readinessProbe:
             httpGet:
               path: /health

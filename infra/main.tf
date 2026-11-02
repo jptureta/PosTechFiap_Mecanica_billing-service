@@ -51,3 +51,21 @@ resource "aws_db_instance" "service" {
   final_snapshot_identifier  = var.environment == "production" ? "oficina-billing-production-final" : null
   auto_minor_version_upgrade = true
 }
+
+resource "aws_sqs_queue" "billing_commands_dlq" {
+  name                        = "oficina-billing-commands-${var.environment}-dlq.fifo"
+  fifo_queue                  = true
+  content_based_deduplication = true
+  message_retention_seconds   = 1209600
+}
+
+resource "aws_sqs_queue" "billing_commands" {
+  name                        = "oficina-billing-commands-${var.environment}.fifo"
+  fifo_queue                  = true
+  content_based_deduplication = true
+  visibility_timeout_seconds  = 30
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.billing_commands_dlq.arn
+    maxReceiveCount     = 3
+  })
+}
