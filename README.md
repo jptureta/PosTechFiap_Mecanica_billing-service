@@ -13,10 +13,10 @@ Testes: `uv sync --dev && uv run pytest`.
 ## API e Saga
 
 - `POST /quotes` cria orçamento idempotente por `order_id`.
-- `POST /quotes/{id}/approval` registra aprovação e notifica OS.
+- `POST /quotes/{id}/approval` registra aprovação e publica `QuoteApproved` no RabbitMQ.
 - `POST /quotes/{id}/payments` registra pagamento pendente.
 - `POST /payments/{id}/verify` recebe confirmação/recusa assinada pelo gateway
-  configurado e, se confirmada, notifica o orquestrador OS.
+  configurado e publica `PaymentConfirmed` ou `PaymentFailed` para o orquestrador OS.
 - `/internal/payments/{id}/compensate` registra a necessidade de estorno após
   falha de reserva do estoque. Sem integração com um adquirente, o serviço não
   declara que o dinheiro foi devolvido: o pagamento fica `REFUND_REQUIRED` para
@@ -28,6 +28,13 @@ Configure `JWT_SECRET_KEY` e `JWT_ALGORITHM` para validar os mesmos tokens
 assinados pela Lambda/API legada; clientes só acessam orçamentos próprios.
 O namespace também precisa do secret `ghcr-pull` para leitura de imagens privadas
 no GHCR.
+
+Com `MESSAGING_ENABLED=true`, o serviço consome `CreateQuote` e `RefundPayment`
+da fila durável `oficina.billing.commands` e publica os resultados em
+`oficina.os.events`. Configure `RABBITMQ_URL`; em Kubernetes, o deployment lê
+esse valor do secret `microservices-secrets`, chave `rabbitmq-url`. Sem mensageria,
+as rotas internas REST continuam disponíveis para compatibilidade.
+O Billing acessa somente seu banco PostgreSQL. O OS não acessa o banco do Billing.
 
 O RDS exclusivo é definido em `infra/`. Valide com
 `terraform -chdir=infra init -backend=false`, `terraform -chdir=infra validate`

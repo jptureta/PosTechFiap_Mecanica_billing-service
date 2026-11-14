@@ -1,5 +1,6 @@
 import logging
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Annotated, Literal
@@ -12,6 +13,7 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, JSON, Numeric, String, cre
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
+from app import messaging
 from app.auth import Actor, get_actor
 
 logger = logging.getLogger(__name__)
@@ -117,7 +119,66 @@ def dispatch_quote_notification(quote: Quote) -> bool:
     return True
 
 
-app = FastAPI(title="Orçamento e Pagamento", version="1.0.0")
+def persist_quote(payload: CreateQuote, response: Response, db: Session) -> Quote:
+    quote = db.scalar(select(Quote).where(Quote.order_id == payload.order_id))
+    item_data = [item.model_dump(mode="json") for item in payload.items]
+    if quote is not None:
+        if quote.items != item_data or quote.customer_id != payload.customer_id:
+            raise HTTPException(status_code=409, detail="order already has a different quote")
+        response.status_code = status.HTTP_200_OK
+        return quote
+    total = sum((item.unit_price * item.quantity for item in payload.items), Decimal("0.00"))
+    quote = Quote(
+        order_id=payload.order_id,
+        customer_id=payload.customer_id,
+        items=item_data,
+        total=total,
+    )
+    dispatch_quote_notification(quote)
+    db.add(quote)
+    db.commit()
+    db.refresh(quote)
+    return quote
+
+
+def handle_billing_command(message_type: str, payload: dict) -> None:
+    with SessionLocal() as db:
+        if message_type == "CreateQuote":
+            quote = persist_quote(CreateQuote.model_validate(payload), Response(), db)
+            messaging.publish(
+                messaging.OS_EVENTS_QUEUE,
+                "QuoteCreated",
+                {"order_id": quote.order_id, "quote_id": quote.id},
+            )
+            return
+        if message_type == "RefundPayment":
+            payment = db.get(Payment, payload["payment_id"])
+            if payment is None:
+                raise ValueError(f"payment not found: {payload['payment_id']}")
+            if payment.status == "DECLINED":
+                raise ValueError("declined payment does not require refund")
+            payment.status = "REFUND_REQUIRED"
+            db.commit()
+            messaging.publish(
+                messaging.OS_EVENTS_QUEUE,
+                "PaymentRefundRequested",
+                {"order_id": payload["order_id"], "payment_id": payment.id},
+            )
+            return
+        raise ValueError(f"unsupported billing command: {message_type}")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    stop = None
+    if messaging.MESSAGING_ENABLED:
+        stop = messaging.start_consumer(messaging.BILLING_COMMANDS_QUEUE, handle_billing_command)
+    yield
+    if stop is not None:
+        stop.set()
+
+
+app = FastAPI(title="Orçamento e Pagamento", version="1.0.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -142,25 +203,7 @@ def create_quote(
     db: Session = Depends(get_db),
     _: None = Depends(require_internal_token),
 ):
-    quote = db.scalar(select(Quote).where(Quote.order_id == payload.order_id))
-    item_data = [item.model_dump(mode="json") for item in payload.items]
-    if quote is not None:
-        if quote.items != item_data or quote.customer_id != payload.customer_id:
-            raise HTTPException(status_code=409, detail="order already has a different quote")
-        response.status_code = status.HTTP_200_OK
-        return quote
-    total = sum((item.unit_price * item.quantity for item in payload.items), Decimal("0.00"))
-    quote = Quote(
-        order_id=payload.order_id,
-        customer_id=payload.customer_id,
-        items=item_data,
-        total=total,
-    )
-    dispatch_quote_notification(quote)
-    db.add(quote)
-    db.commit()
-    db.refresh(quote)
-    return quote
+    return persist_quote(payload, response, db)
 
 
 @app.post("/quotes/{quote_id}/send", response_model=QuoteResponse)
@@ -193,6 +236,20 @@ def approve_quote(
         raise HTTPException(status_code=409, detail="quote cannot be approved in its current state")
     quote.status = "APPROVED"
     db.commit()
+    if messaging.MESSAGING_ENABLED:
+        try:
+            messaging.publish(
+                messaging.OS_EVENTS_QUEUE,
+                "QuoteApproved",
+                {"order_id": quote.order_id, "quote_id": quote.id},
+            )
+        except Exception as exc:
+            logger.exception("could not publish quote approval for quote %s", quote.id)
+            raise HTTPException(
+                status_code=503,
+                detail="quote approved; OS notification can be retried",
+            ) from exc
+        return {"quote_id": quote.id, "status": quote.status}
     try:
         response = httpx.post(
             f"{OS_SERVICE_URL}/internal/orders/{quote.order_id}/quote-approved",
@@ -262,7 +319,22 @@ def verify_payment(
     payment.provider_reference = payload.provider_reference
     payment.verified_at = datetime.now(timezone.utc)
     db.commit()
-    if payload.status == "CONFIRMED":
+    if messaging.MESSAGING_ENABLED:
+        quote = db.get(Quote, payment.quote_id)
+        event_type = "PaymentConfirmed" if payload.status == "CONFIRMED" else "PaymentFailed"
+        try:
+            messaging.publish(
+                messaging.OS_EVENTS_QUEUE,
+                event_type,
+                {"order_id": quote.order_id, "quote_id": quote.id, "payment_id": payment.id},
+            )
+        except Exception as exc:
+            logger.exception("payment %s verified; OS saga event could not be published", payment.id)
+            raise HTTPException(
+                status_code=503,
+                detail="payment verified; saga notification can be retried",
+            ) from exc
+    elif payload.status == "CONFIRMED":
         quote = db.get(Quote, payment.quote_id)
         try:
             response = httpx.post(

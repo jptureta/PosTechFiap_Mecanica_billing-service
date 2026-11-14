@@ -16,6 +16,7 @@ def client_for_test(monkeypatch):
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     main.Base.metadata.create_all(engine)
     monkeypatch.setattr(main, "engine", engine)
+    monkeypatch.setattr(main, "SessionLocal", factory)
     main.INTERNAL_TOKEN = "test-internal"
     main.PAYMENT_PROVIDER_TOKEN = "test-provider"
 
@@ -110,6 +111,68 @@ def test_verified_payment_notifies_order_orchestrator(monkeypatch):
         assert response.status_code == 200
         assert response.json()["status"] == "CONFIRMED"
         assert calls[-1][1]["json"] == {"order_id": "order-3", "payment_id": payment["id"]}
+    finally:
+        main.app.dependency_overrides.clear()
+        engine.dispose()
+
+
+def test_billing_commands_create_quote_and_request_compensation(monkeypatch):
+    client, engine = client_for_test(monkeypatch)
+    events = []
+    monkeypatch.setattr(main.messaging, "publish", lambda queue, kind, payload: events.append((queue, kind, payload)))
+    quote_payload = {
+        "order_id": "order-command",
+        "customer_id": "customer-command",
+        "items": [{"sku": "filter", "name": "Filter", "quantity": 1, "unit_price": "9.00"}],
+    }
+    try:
+        main.handle_billing_command("CreateQuote", quote_payload)
+        assert events[0][0] == main.messaging.OS_EVENTS_QUEUE
+        assert events[0][1] == "QuoteCreated"
+        assert events[0][2]["order_id"] == "order-command"
+
+        with main.SessionLocal() as db:
+            quote = db.query(main.Quote).filter_by(order_id="order-command").one()
+            payment = main.Payment(quote_id=quote.id)
+            db.add(payment)
+            db.commit()
+            payment_id = payment.id
+
+        main.handle_billing_command("RefundPayment", {"order_id": "order-command", "payment_id": payment_id})
+        with main.SessionLocal() as db:
+            assert db.get(main.Payment, payment_id).status == "REFUND_REQUIRED"
+        assert events[-1][1] == "PaymentRefundRequested"
+        assert events[-1][2] == {"order_id": "order-command", "payment_id": payment_id}
+    finally:
+        main.app.dependency_overrides.clear()
+        engine.dispose()
+
+
+def test_approval_and_verified_payment_publish_saga_events(monkeypatch):
+    client, engine = client_for_test(monkeypatch)
+    events = []
+    monkeypatch.setattr(main.messaging, "MESSAGING_ENABLED", True)
+    monkeypatch.setattr(main.messaging, "publish", lambda queue, kind, payload: events.append((queue, kind, payload)))
+    try:
+        quote = client.post(
+            "/quotes",
+            json={
+                "order_id": "order-events",
+                "customer_id": "customer-events",
+                "items": [{"sku": "filter", "name": "Filter", "quantity": 1, "unit_price": "9.00"}],
+            },
+            headers={"X-Internal-Token": "test-internal"},
+        ).json()
+        assert client.post(f"/quotes/{quote['id']}/approval").status_code == 200
+        payment = client.post(f"/quotes/{quote['id']}/payments").json()
+        verified = client.post(
+            f"/payments/{payment['id']}/verify",
+            json={"status": "CONFIRMED", "provider_reference": "provider-456"},
+            headers={"X-Provider-Token": "test-provider"},
+        )
+        assert verified.status_code == 200
+        assert [event[1] for event in events] == ["QuoteApproved", "PaymentConfirmed"]
+        assert all(event[0] == main.messaging.OS_EVENTS_QUEUE for event in events)
     finally:
         main.app.dependency_overrides.clear()
         engine.dispose()
