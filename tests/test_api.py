@@ -17,8 +17,8 @@ def client_for_test(monkeypatch):
     main.Base.metadata.create_all(engine)
     monkeypatch.setattr(main, "engine", engine)
     monkeypatch.setattr(main, "SessionLocal", factory)
-    main.INTERNAL_TOKEN = "test-internal"
-    main.PAYMENT_PROVIDER_TOKEN = "test-provider"
+    monkeypatch.setattr(main, "INTERNAL_TOKEN", "test-internal")
+    monkeypatch.setattr(main, "PAYMENT_PROVIDER_TOKEN", "test-provider")
 
     def override_db():
         with factory() as session:
@@ -53,6 +53,104 @@ def test_quote_idempotency_and_total(monkeypatch):
         resend = client.post(f"/quotes/{first.json()['id']}/send")
         assert resend.status_code == 200
         assert resend.json()["notification_sent"] is True
+    finally:
+        main.app.dependency_overrides.clear()
+        engine.dispose()
+
+
+def test_quote_access_payment_state_and_compensation_errors(monkeypatch):
+    client, engine = client_for_test(monkeypatch)
+    headers = {"X-Internal-Token": "test-internal"}
+    payload = {
+        "order_id": "order-errors",
+        "customer_id": "customer-errors",
+        "items": [{"sku": "oil", "name": "Oil", "quantity": 1, "unit_price": "10.00"}],
+    }
+    try:
+        assert client.get("/health").status_code == 200
+        assert client.get("/health/live").status_code == 200
+        assert client.post("/quotes", json=payload).status_code == 401
+
+        quote = client.post("/quotes", json=payload, headers=headers).json()
+        conflict = {**payload, "items": [{"sku": "oil", "name": "Changed", "quantity": 1, "unit_price": "10.00"}]}
+        assert client.post("/quotes", json=conflict, headers=headers).status_code == 409
+        assert client.get("/quotes/missing").status_code == 404
+        assert client.post("/quotes/missing/approval").status_code == 404
+        assert client.post("/quotes/missing/payments").status_code == 404
+
+        main.app.dependency_overrides[get_actor] = lambda: Actor(is_admin=False, customer_id="another-customer")
+        assert client.get(f"/quotes/{quote['id']}").status_code == 403
+        assert client.post(f"/quotes/{quote['id']}/send").status_code == 403
+        assert client.post(f"/quotes/{quote['id']}/approval").status_code == 403
+
+        main.app.dependency_overrides[get_actor] = lambda: Actor(is_admin=False, customer_id="customer-errors")
+        assert client.post(f"/quotes/{quote['id']}/payments").status_code == 409
+        assert client.post(f"/quotes/{quote['id']}/approval").status_code == 200
+        payment = client.post(f"/quotes/{quote['id']}/payments").json()
+        assert client.post(f"/quotes/{quote['id']}/payments").json()["id"] == payment["id"]
+
+        assert client.post(
+            f"/payments/{payment['id']}/verify",
+            json={"status": "UNKNOWN", "provider_reference": "provider-1"},
+            headers={"X-Provider-Token": "test-provider"},
+        ).status_code == 422
+        assert client.post(
+            "/payments/missing/verify",
+            json={"status": "DECLINED", "provider_reference": "provider-1"},
+            headers={"X-Provider-Token": "test-provider"},
+        ).status_code == 404
+        declined = client.post(
+            f"/payments/{payment['id']}/verify",
+            json={"status": "DECLINED", "provider_reference": "provider-1"},
+            headers={"X-Provider-Token": "test-provider"},
+        )
+        assert declined.status_code == 200
+        assert client.post(
+            f"/payments/{payment['id']}/verify",
+            json={"status": "CONFIRMED", "provider_reference": "provider-2"},
+            headers={"X-Provider-Token": "test-provider"},
+        ).status_code == 409
+        assert client.post(
+            f"/internal/payments/{payment['id']}/compensate",
+            headers=headers,
+        ).status_code == 409
+        assert client.post("/internal/payments/missing/compensate", headers=headers).status_code == 404
+    finally:
+        main.app.dependency_overrides.clear()
+        engine.dispose()
+
+
+def test_messaging_publish_failures_are_reported(monkeypatch):
+    client, engine = client_for_test(monkeypatch)
+    monkeypatch.setattr(main.messaging, "MESSAGING_ENABLED", True)
+    events = []
+
+    def publish(queue, event_type, payload):
+        events.append((queue, event_type, payload))
+        if event_type in {"QuoteApproved", "PaymentConfirmed"}:
+            raise RuntimeError("broker unavailable")
+
+    monkeypatch.setattr(main.messaging, "publish", publish)
+    try:
+        quote = client.post(
+            "/quotes",
+            json={
+                "order_id": "order-publish-failure",
+                "customer_id": "customer-publish-failure",
+                "items": [{"sku": "oil", "name": "Oil", "quantity": 1, "unit_price": "10.00"}],
+            },
+            headers={"X-Internal-Token": "test-internal"},
+        ).json()
+        assert client.post(f"/quotes/{quote['id']}/approval").status_code == 503
+        payment = client.post(f"/quotes/{quote['id']}/payments").json()
+        response = client.post(
+            f"/payments/{payment['id']}/verify",
+            json={"status": "CONFIRMED", "provider_reference": "provider-3"},
+            headers={"X-Provider-Token": "test-provider"},
+        )
+        assert response.status_code == 503
+        assert events[-1][1] == "PaymentConfirmed"
+        assert client.get(f"/quotes/{quote['id']}").status_code == 200
     finally:
         main.app.dependency_overrides.clear()
         engine.dispose()
