@@ -60,7 +60,7 @@ spec:
             httpGet:
               path: /health/live
               port: 8000
-              initialDelaySeconds: 10
+            initialDelaySeconds: 10
           securityContext:
             allowPrivilegeEscalation: false
             runAsNonRoot: true

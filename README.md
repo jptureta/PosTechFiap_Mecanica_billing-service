@@ -40,3 +40,47 @@ O RDS exclusivo é definido em `infra/`. Valide com
 `terraform -chdir=infra init -backend=false`, `terraform -chdir=infra validate`
 e `terraform -chdir=infra plan` após fornecer as variáveis requeridas. O apply
 exige backend de estado remoto e revisão do plano antes de provisionar recursos.
+
+## Arquitetura do serviço
+
+```mermaid
+flowchart LR
+  OS[os-service<br/>orquestrador da Saga] -- CreateQuote / RefundPayment --> Q1{{RabbitMQ<br/>oficina.billing.commands}}
+  Q1 --> B[billing-service :8002]
+  B -- QuoteCreated / QuoteApproved<br/>PaymentConfirmed / PaymentFailed<br/>PaymentRefundRequested --> Q2{{RabbitMQ<br/>oficina.os.events}}
+  Q2 --> OS
+  B --> PG[(RDS PostgreSQL<br/>billing)]
+  B -. logs JSON + /metrics .-> DD[Datadog]
+```
+
+A especificação completa da API está em [`openapi.json`](./openapi.json) e em `/docs` com o serviço rodando.
+
+## Mensageria e rastreamento
+
+- Toda mensagem publicada repassa o `correlation_id` recebido, então uma OS pode ser seguida de ponta a ponta nos logs dos três serviços.
+- As filas são declaradas com `x-dead-letter-exchange: ""` e `x-dead-letter-routing-key: <fila>.dlq`: mensagens que falham no processamento vão para `oficina.billing.commands.dlq` em vez de serem descartadas. Como o argumento de declaração mudou, as filas antigas precisam ser apagadas no broker antes do primeiro deploy.
+
+## Observabilidade
+
+- Logs JSON com `correlation_id`, rota, status e latência de cada requisição (mesmo formato do OS).
+- `GET /metrics` com total de requisições, erros, latência e eventos publicados/consumidos.
+- O cabeçalho `X-Correlation-ID` é aceito na entrada e devolvido na resposta.
+
+## Evidência de cobertura (92% > 80% exigido)
+
+```text
+Name                   Stmts   Miss  Cover
+------------------------------------------
+app/__init__.py            0      0   100%
+app/auth.py               28      0   100%
+app/main.py              240     26    89%
+app/messaging.py          78      6    92%
+app/observability.py      59      2    97%
+------------------------------------------
+TOTAL                    405     34    92%
+17 passed
+```
+
+## CI/CD
+
+`.github/workflows/ci-cd.yml`: testes com gate de 80%, Ruff, **SonarCloud obrigatório com Quality Gate** (`SONAR_TOKEN` precisa estar nos secrets do repo), validação do Terraform, build/push da imagem no GHCR e deploy no EKS.

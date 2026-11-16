@@ -13,10 +13,10 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, JSON, Numeric, String, cre
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
-from app import messaging
+from app import messaging, observability
 from app.auth import Actor, get_actor
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("billing-service")
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./billing-service.db")
 OS_SERVICE_URL = os.getenv("OS_SERVICE_URL", "http://os-service:8000").rstrip("/")
 INTERNAL_TOKEN = os.getenv("INTERNAL_SERVICE_TOKEN", "")
@@ -179,6 +179,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Orçamento e Pagamento", version="1.0.0", lifespan=lifespan)
+observability.instrument_app(app, "billing-service")
 
 
 @app.get("/health")
