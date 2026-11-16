@@ -36,6 +36,26 @@ spec:
                 secretKeyRef:
                   name: billing-service-secrets
                   key: payment-provider-token
+            - name: MERCADO_PAGO_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: billing-service-secrets
+                  key: mercado-pago-access-token
+            - name: MERCADO_PAGO_USER_ID
+              valueFrom:
+                secretKeyRef:
+                  name: billing-service-secrets
+                  key: mercado-pago-user-id
+            - name: MERCADO_PAGO_POS_ID
+              valueFrom:
+                secretKeyRef:
+                  name: billing-service-secrets
+                  key: mercado-pago-pos-id
+            - name: MERCADO_PAGO_NOTIFICATION_URL
+              valueFrom:
+                secretKeyRef:
+                  name: billing-service-secrets
+                  key: mercado-pago-notification-url
             - name: JWT_SECRET_KEY
               valueFrom:
                 secretKeyRef:

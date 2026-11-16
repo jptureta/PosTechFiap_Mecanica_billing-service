@@ -344,6 +344,44 @@
         }
       }
     },
+    "/payments/mercado-pago/webhook": {
+      "post": {
+        "summary": "Mercado Pago Webhook",
+        "operationId": "mercado_pago_webhook_payments_mercado_pago_webhook_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object",
+                "title": "Payload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/internal/payments/{payment_id}/compensate": {
       "post": {
         "summary": "Request Compensation",
