@@ -14,7 +14,8 @@ Testes e qualidade: `uv sync --dev && uv run pytest --cov=app --cov-report=term-
 
 - `POST /quotes` cria orçamento idempotente por `order_id`.
 - `POST /quotes/{id}/approval` registra aprovação e publica `QuoteApproved` no RabbitMQ.
-- `POST /quotes/{id}/payments` registra pagamento pendente.
+- `POST /quotes/{id}/payments` registra pagamento pendente. Com o Mercado Pago configurado, cria o pedido QR dinâmico e retorna `qr_data` para geração do código.
+- `POST /payments/mercado-pago/webhook` recebe a notificação `merchant_order` do Mercado Pago, consulta a merchant order na API e publica `PaymentConfirmed` ou `PaymentFailed` para o orquestrador OS (sem mensageria, avisa o OS por REST quando aprovado).
 - `POST /payments/{id}/verify` recebe confirmação/recusa assinada pelo gateway
   configurado e publica `PaymentConfirmed` ou `PaymentFailed` para o orquestrador OS.
 - `/internal/payments/{id}/compensate` registra a necessidade de estorno após
@@ -23,6 +24,17 @@ Testes e qualidade: `uv sync --dev && uv run pytest --cov=app --cov-report=term-
   reconciliação com o provedor.
 
 Configure `OS_SERVICE_URL`, `INTERNAL_SERVICE_TOKEN` e `PAYMENT_PROVIDER_TOKEN`.
+Para Mercado Pago QR dinâmico, configure também `MERCADO_PAGO_ACCESS_TOKEN`,
+`MERCADO_PAGO_USER_ID`, `MERCADO_PAGO_POS_ID` e `MERCADO_PAGO_NOTIFICATION_URL`.
+Cadastre o webhook público em
+`POST /api/v2/payments/mercado-pago/webhook` (encaminhado pelo gateway para o
+serviço) para o Mercado Pago notificar a aprovação
+através de um `merchant_order`. O access token, o user ID e o POS devem pertencer
+à mesma conta Mercado Pago e o POS deve estar cadastrado previamente no painel.
+No Kubernetes, essas variáveis vêm do secret `billing-service-secrets` (chaves
+`mercado-pago-access-token`, `mercado-pago-user-id`, `mercado-pago-pos-id` e
+`mercado-pago-notification-url`); a migration `0002_mercado_pago` adiciona
+`qr_data` e `provider` ao pagamento.
 Use o mesmo token interno no OS e Inventory.
 Configure `JWT_SECRET_KEY` e `JWT_ALGORITHM` para validar os mesmos tokens
 assinados pela Lambda/API legada; clientes só acessam orçamentos próprios.
@@ -50,6 +62,8 @@ flowchart LR
   B -- QuoteCreated / QuoteApproved<br/>PaymentConfirmed / PaymentFailed<br/>PaymentRefundRequested --> Q2{{RabbitMQ<br/>oficina.os.events}}
   Q2 --> OS
   B --> PG[(RDS PostgreSQL<br/>billing)]
+  B -- QR dinâmico / consulta merchant order --> MP[API Mercado Pago]
+  MP -- webhook merchant_order --> B
   B -. logs JSON + /metrics .-> DD[Datadog]
 ```
 
@@ -66,19 +80,19 @@ A especificação completa da API está em [`openapi.json`](./openapi.json) e em
 - `GET /metrics` com total de requisições, erros, latência e eventos publicados/consumidos.
 - O cabeçalho `X-Correlation-ID` é aceito na entrada e devolvido na resposta.
 
-## Evidência de cobertura (92% > 80% exigido)
+## Evidência de cobertura (94% > 80% exigido)
 
 ```text
 Name                   Stmts   Miss  Cover
 ------------------------------------------
 app/__init__.py            0      0   100%
 app/auth.py               28      0   100%
-app/main.py              240     26    89%
+app/main.py              326     23    93%
 app/messaging.py          78      6    92%
 app/observability.py      59      2    97%
 ------------------------------------------
-TOTAL                    405     34    92%
-17 passed
+TOTAL                    491     31    94%
+31 passed
 ```
 
 ## CI/CD
